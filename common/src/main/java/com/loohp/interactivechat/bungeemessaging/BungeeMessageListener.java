@@ -141,7 +141,8 @@ public class BungeeMessageListener implements PluginMessageListener {
                 }
 
                 if (InteractiveChat.pluginMessagePacketVerbose) {
-                    Bukkit.getConsoleSender().sendMessage("IC Inbound - ID " + packetId + " via " + pluginMessagingPlayer.getName());
+                    String playerName = pluginMessagingPlayer != null ? pluginMessagingPlayer.getName() : "Redis";
+                    Bukkit.getConsoleSender().sendMessage("IC Inbound - ID " + packetId + " via " + playerName);
                 }
                 ByteArrayDataInput input = ByteStreams.newDataInput(data);
 
@@ -439,6 +440,54 @@ public class BungeeMessageListener implements PluginMessageListener {
                             if (player4 != null) {
                                 Scheduler.runTask(InteractiveChat.plugin, () -> PlayerUtils.dispatchCommandAsPlayer(player4, command), player4);
                             }
+                        }
+                        break;
+                    case 0x16:
+                        // Redis partial player list update - only updates players from a specific server
+                        // Unlike 0x00, this doesn't replace the entire list, just updates one server's players
+                        String sourceServer = DataTypeIO.readString(input, StandardCharsets.UTF_8);
+                        int playerCount = input.readInt();
+                        Set<UUID> localPlayers = Bukkit.getOnlinePlayers().stream().map(p -> p.getUniqueId()).collect(Collectors.toSet());
+                        Set<UUID> playersFromThisServer = new HashSet<>();
+
+                        // Track which UUIDs we currently have from this source server
+                        Set<UUID> existingFromServer = new HashSet<>();
+                        for (UUID remoteUUID : ICPlayerFactory.getRemoteUUIDs()) {
+                            ICPlayer remotePlayer = ICPlayerFactory.getICPlayer(remoteUUID);
+                            if (remotePlayer != null && sourceServer.equals(remotePlayer.getRemoteServer())) {
+                                existingFromServer.add(remoteUUID);
+                            }
+                        }
+
+                        // Add/update players from this server
+                        for (int i = 0; i < playerCount; i++) {
+                            UUID playerUUID6 = DataTypeIO.readUUID(input);
+                            String playerName = DataTypeIO.readString(input, StandardCharsets.UTF_8);
+                            playersFromThisServer.add(playerUUID6);
+
+                            // Don't add local players as remote
+                            if (localPlayers.contains(playerUUID6)) {
+                                continue;
+                            }
+
+                            ICPlayer existingPlayer = ICPlayerFactory.getICPlayer(playerUUID6);
+                            if (existingPlayer == null) {
+                                // Create new remote player
+                                ICPlayerFactory.createOrUpdateRemoteICPlayer(sourceServer, playerName, playerUUID6, true, 0, 0,
+                                        Bukkit.createInventory(ICInventoryHolder.INSTANCE, 45),
+                                        Bukkit.createInventory(ICInventoryHolder.INSTANCE, InventoryUtils.getDefaultEnderChestSize()), false);
+                            } else if (!existingPlayer.isLocal()) {
+                                // Update existing remote player's server if needed
+                                if (!sourceServer.equals(existingPlayer.getRemoteServer())) {
+                                    existingPlayer.setRemoteServer(sourceServer);
+                                }
+                            }
+                        }
+
+                        // Remove players that were on this server but are no longer
+                        existingFromServer.removeAll(playersFromThisServer);
+                        for (UUID removedUUID : existingFromServer) {
+                            ICPlayerFactory.removeRemoteICPlayer(removedUUID);
                         }
                         break;
                     case 0xFF:

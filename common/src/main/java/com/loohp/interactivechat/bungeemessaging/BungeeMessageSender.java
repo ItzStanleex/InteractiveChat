@@ -89,17 +89,13 @@ public class BungeeMessageSender {
     }
 
     public static boolean forwardData(long time, int packetId, byte[] data) throws Exception {
+        DataBroker dataBroker = InteractiveChat.dataBroker;
+        if (dataBroker == null) {
+            return false;
+        }
+
         long index = (time << 16) + packetId;
         String hash = HashUtils.createSha1String(new ByteArrayInputStream(data));
-
-        Collection<? extends Player> players = Bukkit.getOnlinePlayers();
-        if (players.isEmpty()) {
-            return false;
-        }
-        Player player = players.stream().skip(random.nextInt(players.size())).findAny().orElse(null);
-        if (player == null) {
-            return false;
-        }
 
         synchronized (sent) {
             Set<String> cacheData = sent.get(index);
@@ -116,10 +112,6 @@ public class BungeeMessageSender {
             }
         }
 
-        if (InteractiveChat.pluginMessagePacketVerbose) {
-            Bukkit.getConsoleSender().sendMessage("IC Outbound - ID " + packetId + " via " + player.getName());
-        }
-
         int packetNumber = random.nextInt();
         try {
             byte[][] dataArray = CustomArrayUtils.divideArray(data, 32700);
@@ -134,7 +126,10 @@ public class BungeeMessageSender {
                 out.writeShort(packetId); //packet id
 
                 out.write(chunk);
-                player.sendPluginMessage(InteractiveChat.plugin, "interchat:main", out.toByteArray());
+
+                if (!dataBroker.sendData(out.toByteArray())) {
+                    return false;
+                }
             }
         } catch (Exception e) {
             e.printStackTrace();
@@ -361,6 +356,24 @@ public class BungeeMessageSender {
         DataTypeIO.writeUUID(out, player);
         DataTypeIO.writeString(out, command, StandardCharsets.UTF_8);
         return forwardData(time, 0x15, out.toByteArray());
+    }
+
+    /**
+     * Broadcasts the local server's player list to other servers.
+     * Used in Redis mode where there's no proxy to coordinate player lists.
+     * This uses packet 0x16 which handles partial updates (per-server) instead of full replacement.
+     */
+    public static boolean broadcastPlayerList(long time, String serverName, Collection<? extends Player> players) throws Exception {
+        ByteArrayDataOutput out = ByteStreams.newDataOutput();
+        // First write the source server name
+        DataTypeIO.writeString(out, serverName, StandardCharsets.UTF_8);
+        // Then write player count and player data
+        out.writeInt(players.size());
+        for (Player player : players) {
+            DataTypeIO.writeUUID(out, player.getUniqueId());
+            DataTypeIO.writeString(out, player.getName(), StandardCharsets.UTF_8);
+        }
+        return forwardData(time, 0x16, out.toByteArray());
     }
 
 }

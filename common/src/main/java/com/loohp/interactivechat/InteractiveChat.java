@@ -23,6 +23,10 @@ package com.loohp.interactivechat;
 import com.loohp.interactivechat.api.InteractiveChatAPI;
 import com.loohp.interactivechat.bungeemessaging.BungeeMessageListener;
 import com.loohp.interactivechat.bungeemessaging.BungeeMessageSender;
+import com.loohp.interactivechat.bungeemessaging.DataBroker;
+import com.loohp.interactivechat.bungeemessaging.DataBrokerType;
+import com.loohp.interactivechat.bungeemessaging.PluginMessageBroker;
+import com.loohp.interactivechat.bungeemessaging.RedisBroker;
 import com.loohp.interactivechat.bungeemessaging.ServerPingListener;
 import com.loohp.interactivechat.config.ConfigManager;
 import com.loohp.interactivechat.data.Database;
@@ -333,6 +337,12 @@ public class InteractiveChat extends JavaPlugin {
     public static int remoteDelay = 500;
     public static boolean queueRemoteUpdate = false;
 
+    public static DataBroker dataBroker = null;
+    public static DataBrokerType dataBrokerType = DataBrokerType.PLUGIN_MESSAGE;
+    public static String crossServerName = "server1";
+    public static String redisUrl = "redis://localhost:6379/0";
+    public static String redisChannelSuffix = "main";
+
     public static ItemStack unknownReplaceItem;
 
     public static boolean useAccurateSenderFinder = true;
@@ -466,14 +476,35 @@ public class InteractiveChat extends JavaPlugin {
 
         getCommand("interactivechat").setExecutor(new Commands());
 
-        bungeecordMode = ConfigManager.getConfig().getBoolean("Settings.Bungeecord");
+        // Load bungeecord/cross-server configuration
+        // Support both old format (Settings.Bungeecord: boolean) and new format (Settings.Bungeecord.Enabled: boolean)
+        if (ConfigManager.getConfig().isBoolean("Settings.Bungeecord")) {
+            // Old config format - simple boolean
+            bungeecordMode = ConfigManager.getConfig().getBoolean("Settings.Bungeecord");
+            dataBrokerType = DataBrokerType.PLUGIN_MESSAGE;
+            crossServerName = "server1";
+        } else {
+            // New config format - nested configuration
+            bungeecordMode = ConfigManager.getConfig().getBoolean("Settings.Bungeecord.Enabled", false);
+            dataBrokerType = DataBrokerType.fromString(ConfigManager.getConfig().getString("Settings.Bungeecord.DataBroker", "PLUGIN_MESSAGE"));
+            crossServerName = ConfigManager.getConfig().getString("Settings.Bungeecord.ServerName", "server1");
+            redisUrl = ConfigManager.getConfig().getString("Settings.Bungeecord.Redis.Url", "redis://localhost:6379/0");
+            redisChannelSuffix = ConfigManager.getConfig().getString("Settings.Bungeecord.Redis.ChannelNameSuffix", "main");
+        }
 
         if (bungeecordMode) {
-            getServer().getConsoleSender().sendMessage(ChatColor.GREEN + "[InteractiveChat] Registering Plugin Messaging Channels for bungeecord...");
-            getServer().getMessenger().registerOutgoingPluginChannel(this, "interchat:main");
-            getServer().getMessenger().registerIncomingPluginChannel(this, "interchat:main", bungeeMessageListener = new BungeeMessageListener(this));
+            // Initialize data broker based on type
+            if (dataBrokerType == DataBrokerType.REDIS) {
+                dataBroker = new RedisBroker(this, crossServerName, redisUrl, redisChannelSuffix);
+            } else {
+                dataBroker = new PluginMessageBroker(this, crossServerName);
+            }
 
-            ServerPingListener.listen();
+            if (!dataBroker.start()) {
+                getServer().getConsoleSender().sendMessage(ChatColor.RED + "[InteractiveChat] Failed to start data broker! Cross-server communication may not work.");
+            } else {
+                getServer().getConsoleSender().sendMessage(ChatColor.GREEN + "[InteractiveChat] Cross-server communication enabled using " + dataBrokerType.name());
+            }
 
             Scheduler.runTaskTimerAsynchronously(plugin, () -> {
                 if (parsePAPIOnMainThread) {
@@ -723,9 +754,55 @@ public class InteractiveChat extends JavaPlugin {
         gc();
     }
 
+    /**
+     * Restarts the data broker connection (Redis or Plugin Message).
+     * Should be called on plugin reload to ensure reconnection.
+     */
+    public static void restartDataBroker() {
+        if (!bungeecordMode) {
+            Bukkit.getConsoleSender().sendMessage("[InteractiveChat] Data broker restart skipped - Bungeecord mode is disabled");
+            return;
+        }
+
+        Bukkit.getConsoleSender().sendMessage("[InteractiveChat] Restarting data broker...");
+
+        // Stop existing broker
+        if (dataBroker != null) {
+            dataBroker.stop();
+            dataBroker = null;
+        }
+
+        // Re-read config for broker settings
+        if (ConfigManager.getConfig().isBoolean("Settings.Bungeecord")) {
+            dataBrokerType = DataBrokerType.PLUGIN_MESSAGE;
+            crossServerName = "server1";
+        } else {
+            dataBrokerType = DataBrokerType.fromString(ConfigManager.getConfig().getString("Settings.Bungeecord.DataBroker", "PLUGIN_MESSAGE"));
+            crossServerName = ConfigManager.getConfig().getString("Settings.Bungeecord.ServerName", "server1");
+            redisUrl = ConfigManager.getConfig().getString("Settings.Bungeecord.Redis.Url", "redis://localhost:6379/0");
+            redisChannelSuffix = ConfigManager.getConfig().getString("Settings.Bungeecord.Redis.ChannelNameSuffix", "main");
+        }
+
+        // Create and start new broker
+        if (dataBrokerType == DataBrokerType.REDIS) {
+            dataBroker = new RedisBroker(plugin, crossServerName, redisUrl, redisChannelSuffix);
+        } else {
+            dataBroker = new PluginMessageBroker(plugin, crossServerName);
+        }
+
+        if (!dataBroker.start()) {
+            Bukkit.getConsoleSender().sendMessage(ChatColor.RED + "[InteractiveChat] Failed to restart data broker!");
+        } else {
+            Bukkit.getConsoleSender().sendMessage(ChatColor.GREEN + "[InteractiveChat] Data broker restarted successfully using " + dataBrokerType.name());
+        }
+    }
+
     @Override
     public void onDisable() {
         closeSharedInventoryViews();
+        if (dataBroker != null) {
+            dataBroker.stop();
+        }
         if (nicknameManager != null) {
             nicknameManager.close();
         }

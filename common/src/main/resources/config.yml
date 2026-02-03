@@ -53,8 +53,26 @@ Messages:
     RunSuggested: "Run Suggested Command"
 
 Settings:
-  #Bungeecord Mode
-  Bungeecord: false
+  #Bungeecord/Cross-Server Mode
+  Bungeecord:
+    Enabled: false
+    #The data broker to use for cross-server communication
+    #PLUGIN_MESSAGE - Uses BungeeCord/Velocity plugin messaging (requires InteractiveChat on proxy)
+    #REDIS - Uses Redis Pub/Sub for direct server-to-server communication (no proxy plugin needed)
+    DataBroker: PLUGIN_MESSAGE
+    #Server name for identification in cross-server communication
+    #This is required when using REDIS data broker
+    ServerName: "server1"
+    #Redis configuration (only used when DataBroker is REDIS)
+    Redis:
+      #Redis connection URL in format: redis://[:password@]host:port[/database]
+      #Examples:
+      #  redis://localhost:6379/0
+      #  redis://:mypassword@redis.example.com:6379/0
+      Url: "redis://localhost:6379/0"
+      #Channel name suffix for Redis Pub/Sub
+      #Full channel name will be: interactivechat:<suffix>
+      ChannelNameSuffix: "main"
   UseAccurateSenderParser: true
   TagEveryIdentifiableMessage: false
   #These option is only effective on Minecraft 1.19.1+

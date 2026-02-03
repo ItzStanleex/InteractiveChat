@@ -123,6 +123,14 @@
 									<pattern>org.objectweb</pattern>
 									<shadedPattern>com.loohp.interactivechat.libs.org.objectweb</shadedPattern>
 								</relocation>
+								<relocation>
+									<pattern>redis.clients</pattern>
+									<shadedPattern>com.loohp.interactivechat.libs.redis.clients</shadedPattern>
+								</relocation>
+								<relocation>
+									<pattern>org.apache.commons.pool2</pattern>
+									<shadedPattern>com.loohp.interactivechat.libs.org.apache.commons.pool2</shadedPattern>
+								</relocation>
 							</relocations>
 						</configuration>
 					</execution>
@@ -326,6 +334,18 @@
 			<groupId>com.loohp</groupId>
 			<artifactId>PlatformScheduler</artifactId>
 			<version>1.0.0</version>
+			<scope>compile</scope>
+		</dependency>
+		<dependency>
+			<groupId>redis.clients</groupId>
+			<artifactId>jedis</artifactId>
+			<version>5.1.0</version>
+			<scope>compile</scope>
+		</dependency>
+		<dependency>
+			<groupId>org.apache.commons</groupId>
+			<artifactId>commons-pool2</artifactId>
+			<version>2.12.0</version>
 			<scope>compile</scope>
 		</dependency>
 		<dependency>
@@ -610,6 +630,7 @@
 			<version>${project.version}</version>
 			<scope>compile</scope>
 		</dependency>
+		<!-- Disabled old versions - require Java 8/16/17 and older Spigot
 		<dependency>
 			<groupId>com.loohp</groupId>
 			<artifactId>InteractiveChat-V1_8</artifactId>
@@ -760,30 +781,35 @@
 			<version>${project.version}</version>
 			<scope>compile</scope>
 		</dependency>
+		-->
 		<dependency>
 			<groupId>com.loohp</groupId>
 			<artifactId>InteractiveChat-V1_20_6</artifactId>
 			<version>${project.version}</version>
 			<scope>compile</scope>
 		</dependency>
+		<!-- V1_21 not available from BuildTools
 		<dependency>
 			<groupId>com.loohp</groupId>
 			<artifactId>InteractiveChat-V1_21</artifactId>
 			<version>${project.version}</version>
 			<scope>compile</scope>
 		</dependency>
+		-->
 		<dependency>
 			<groupId>com.loohp</groupId>
 			<artifactId>InteractiveChat-V1_21_1</artifactId>
 			<version>${project.version}</version>
 			<scope>compile</scope>
 		</dependency>
+		<!-- V1_21_2 not available from BuildTools
 		<dependency>
 			<groupId>com.loohp</groupId>
 			<artifactId>InteractiveChat-V1_21_2</artifactId>
 			<version>${project.version}</version>
 			<scope>compile</scope>
 		</dependency>
+		-->
 		<dependency>
 			<groupId>com.loohp</groupId>
 			<artifactId>InteractiveChat-V1_21_3</artifactId>
@@ -796,6 +822,7 @@
 			<version>${project.version}</version>
 			<scope>compile</scope>
 		</dependency>
+		<!-- Future versions - not yet released
 		<dependency>
 			<groupId>com.loohp</groupId>
 			<artifactId>InteractiveChat-V1_21_5</artifactId>
@@ -826,17 +853,20 @@
 		  <version>${project.version}</version>
 		  <scope>compile</scope>
 		</dependency>
+		-->
 		<dependency>
 		  <groupId>com.loohp</groupId>
 		  <artifactId>InteractiveChat-V1_21_10</artifactId>
 		  <version>${project.version}</version>
 		  <scope>compile</scope>
 		</dependency>
+		<!--
 		<dependency>
 		  <groupId>com.loohp</groupId>
 		  <artifactId>InteractiveChat-V1_21_11</artifactId>
 		  <version>${project.version}</version>
 		  <scope>compile</scope>
 		</dependency>
+		-->
 	</dependencies>
 </project>

@@ -43,6 +43,7 @@
 
     <modules>
         <module>abstraction</module>
+        <!-- Disabled old versions - require Java 8/16/17
         <module>V1_8</module>
         <module>V1_8_3</module>
         <module>V1_8_4</module>
@@ -68,19 +69,28 @@
         <module>V1_20_2</module>
         <module>V1_20_3</module>
         <module>V1_20_5</module>
+        -->
         <module>V1_20_6</module>
+        <!-- V1_21 needs 1.21 spigot which BuildTools doesn't provide separately
         <module>V1_21</module>
+        -->
         <module>V1_21_1</module>
+        <!-- V1_21_2 needs 1.21.2 spigot which BuildTools doesn't provide
         <module>V1_21_2</module>
+        -->
         <module>V1_21_3</module>
         <module>V1_21_4</module>
+        <!-- Future versions
         <module>V1_21_5</module>
         <module>V1_21_6</module>
         <module>V1_21_7</module>
         <module>V1_21_8</module>
         <module>V1_21_9</module>
+        -->
         <module>V1_21_10</module>
+        <!--
         <module>V1_21_11</module>
+        -->
         <module>common</module>
     </modules>
 </project>

@@ -86,6 +86,8 @@ public class Commands implements CommandExecutor, TabCompleter {
             if (sender.hasPermission("interactivechat.reload")) {
                 InteractiveChat.closeSharedInventoryViews();
                 ConfigManager.reloadConfig();
+                // Restart data broker (Redis/Plugin Message) with new config
+                InteractiveChat.restartDataBroker();
                 InteractiveChat.placeholderCooldownManager.reloadPlaceholders();
                 PlayerUtils.resetAllPermissionCache();
                 Scheduler.runTaskAsynchronously(InteractiveChat.plugin, () -> InteractiveChat.playerDataManager.reload());
