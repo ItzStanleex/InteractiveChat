@@ -399,6 +399,43 @@ public class Commands implements CommandExecutor, TabCompleter {
             return true;
         }
 
+        if (args[0].equalsIgnoreCase("debug")) {
+            if (sender.hasPermission("interactivechat.debug")) {
+                InteractiveChat.sendMessage(sender, ChatColor.GOLD + "=== InteractiveChat Debug Info ===");
+                InteractiveChat.sendMessage(sender, ChatColor.YELLOW + "Bungeecord Mode: " + ChatColor.WHITE + InteractiveChat.bungeecordMode);
+                InteractiveChat.sendMessage(sender, ChatColor.YELLOW + "Data Broker Type: " + ChatColor.WHITE + InteractiveChat.dataBrokerType);
+                if (InteractiveChat.dataBroker != null) {
+                    InteractiveChat.sendMessage(sender, ChatColor.YELLOW + "Server Name: " + ChatColor.WHITE + InteractiveChat.dataBroker.getServerName());
+                    InteractiveChat.sendMessage(sender, ChatColor.YELLOW + "Data Broker Connected: " + ChatColor.WHITE + InteractiveChat.dataBroker.isConnected());
+                } else {
+                    InteractiveChat.sendMessage(sender, ChatColor.YELLOW + "Data Broker: " + ChatColor.RED + "Not initialized");
+                }
+                InteractiveChat.sendMessage(sender, ChatColor.YELLOW + "Local Players: " + ChatColor.WHITE + Bukkit.getOnlinePlayers().size());
+
+                // Show remote players
+                java.util.Set<UUID> remoteUUIDs = ICPlayerFactory.getRemoteUUIDs();
+                InteractiveChat.sendMessage(sender, ChatColor.YELLOW + "Remote Players (" + remoteUUIDs.size() + "):");
+                for (UUID uuid : remoteUUIDs) {
+                    ICPlayer icPlayer = ICPlayerFactory.getICPlayer(uuid);
+                    if (icPlayer != null) {
+                        String server = icPlayer.getRemoteServer();
+                        String name = icPlayer.getName();
+                        InteractiveChat.sendMessage(sender, ChatColor.GRAY + "  - " + ChatColor.WHITE + name + ChatColor.GRAY + " @ " + ChatColor.AQUA + server);
+                    }
+                }
+
+                // Show all online ICPlayers for mention debugging
+                InteractiveChat.sendMessage(sender, ChatColor.YELLOW + "All ICPlayers (for mentions):");
+                for (ICPlayer icPlayer : ICPlayerFactory.getOnlineICPlayers()) {
+                    String status = icPlayer.isLocal() ? ChatColor.GREEN + "[Local]" : ChatColor.AQUA + "[Remote:" + icPlayer.getRemoteServer() + "]";
+                    InteractiveChat.sendMessage(sender, ChatColor.GRAY + "  - " + ChatColor.WHITE + icPlayer.getName() + " " + status);
+                }
+            } else {
+                InteractiveChat.sendMessage(sender, InteractiveChat.noPermissionMessage);
+            }
+            return true;
+        }
+
         if (args[0].equalsIgnoreCase("dumpnbt")) {
             if (sender.hasPermission("interactivechat.dumpnbt")) {
                 if (sender instanceof Player) {
@@ -587,6 +624,9 @@ public class Commands implements CommandExecutor, TabCompleter {
                 if (isBedrock.getAsBoolean() && sender.hasPermission("interactivechat.bedrock.events")) {
                     tab.add("events");
                 }
+                if (sender.hasPermission("interactivechat.debug")) {
+                    tab.add("debug");
+                }
                 return tab;
             case 1:
                 if (sender.hasPermission("interactivechat.reload")) {
@@ -627,6 +667,11 @@ public class Commands implements CommandExecutor, TabCompleter {
                 if (isBedrock.getAsBoolean() && sender.hasPermission("interactivechat.bedrock.events")) {
                     if ("events".startsWith(args[0].toLowerCase())) {
                         tab.add("events");
+                    }
+                }
+                if (sender.hasPermission("interactivechat.debug")) {
+                    if ("debug".startsWith(args[0].toLowerCase())) {
+                        tab.add("debug");
                     }
                 }
                 return tab;

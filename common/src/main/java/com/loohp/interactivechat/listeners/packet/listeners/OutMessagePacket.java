@@ -22,11 +22,14 @@ package com.loohp.interactivechat.listeners.packet.listeners;
 
 import com.loohp.interactivechat.InteractiveChat;
 import com.loohp.interactivechat.api.events.PostPacketComponentProcessEvent;
+import com.loohp.interactivechat.bungeemessaging.BungeeMessageSender;
+import com.loohp.interactivechat.bungeemessaging.DataBrokerType;
 import com.loohp.interactivechat.api.events.PreChatPacketSendEvent;
 import com.loohp.interactivechat.api.events.PrePacketComponentProcessEvent;
 import com.loohp.interactivechat.data.PlayerDataManager.PlayerData;
 import com.loohp.interactivechat.hooks.triton.TritonHook;
 import com.loohp.interactivechat.hooks.venturechat.VentureChatInjection;
+import com.loohp.interactivechat.listeners.ChatEvents;
 import com.loohp.interactivechat.listeners.packet.MessagePacketHandler;
 import com.loohp.interactivechat.modules.CommandsDisplay;
 import com.loohp.interactivechat.modules.CustomPlaceholderDisplay;
@@ -65,6 +68,7 @@ import net.md_5.bungee.api.ChatColor;
 import org.bukkit.Bukkit;
 import org.bukkit.entity.Player;
 
+import java.util.Map;
 import java.util.Optional;
 import java.util.UUID;
 
@@ -201,6 +205,29 @@ public class OutMessagePacket {
             }
             sender.ifPresent(icPlayer -> InteractiveChat.keyPlayer.put(rawMessageKey, icPlayer));
 
+            // In Redis mode, send pending cross-server mention notifications
+            // This only happens when the chat packet is actually being processed (not cancelled)
+            if (InteractiveChat.dataBrokerType == DataBrokerType.REDIS && sender.isPresent() && sender.get().isLocal()) {
+                Map<UUID, Long> pendingMentions = ChatEvents.consumePendingCrossServerMentions(sender.get().getUniqueId());
+                if (pendingMentions != null && !pendingMentions.isEmpty()) {
+                    for (UUID receiverUUID : pendingMentions.keySet()) {
+                        ICPlayer targetPlayer = ICPlayerFactory.getICPlayer(receiverUUID);
+                        if (targetPlayer != null && !targetPlayer.isLocal()) {
+                            try {
+                                BungeeMessageSender.sendRemoteMentionNotification(
+                                    System.currentTimeMillis(),
+                                    sender.get().getUniqueId(),
+                                    sender.get().getName(),
+                                    receiverUUID
+                                );
+                            } catch (Exception e) {
+                                e.printStackTrace();
+                            }
+                        }
+                    }
+                }
+            }
+
             component = ComponentReplacing.replace(component, Registry.ID_PATTERN.pattern(), Registry.ID_PATTERN_REPLACEMENT);
 
             UUID preEventSenderUUID = sender.map(ICPlayer::getUniqueId).orElse(null);
@@ -234,6 +261,19 @@ public class OutMessagePacket {
                     component = MentionDisplay.process(component, receiver, sender.get(), unix, true);
                 }
             }
+
+            // Cross-server mention highlight: apply if we have a pending highlight and sender wasn't detected
+            // This handles the case where chat comes through CarbonChat but we received packet 0x17
+            if (InteractiveChat.allowMention && InteractiveChat.dataBrokerType == DataBrokerType.REDIS) {
+                MentionDisplay.PendingCrossServerHighlight pendingHighlight = MentionDisplay.consumePendingCrossServerHighlight(receiver.getUniqueId());
+                if (pendingHighlight != null) {
+                    PlayerData data = InteractiveChat.playerDataManager.getPlayerData(receiver);
+                    if (data == null || !data.isMentionDisabled()) {
+                        component = MentionDisplay.applyCrossServerHighlight(component, receiver, pendingHighlight);
+                    }
+                }
+            }
+
             component = ComponentReplacing.replace(component, Registry.MENTION_TAG_CONVERTER.getReversePattern().pattern(), true, (result, components) -> {
                 return LegacyComponentSerializer.legacySection().deserialize(ChatColorUtils.translateAlternateColorCodes('&', InteractiveChat.mentionHighlightOthers)).replaceText(TextReplacementConfig.builder().matchLiteral("{MentionedPlayer}").replacement(PlainTextComponentSerializer.plainText().deserialize(result.group(2))).build());
             });

@@ -30,6 +30,7 @@ import redis.clients.jedis.JedisPoolConfig;
 import redis.clients.jedis.JedisPubSub;
 
 import java.net.URI;
+import java.time.Duration;
 import java.util.Base64;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -49,6 +50,8 @@ public class RedisBroker implements DataBroker {
     private final String channelName;
 
     private JedisPool jedisPool;
+    private Jedis publisherConnection;  // Dedicated connection for publishing - avoids pool overhead
+    private final Object publisherLock = new Object();
     private JedisPubSub subscriber;
     private ExecutorService subscriberExecutor;
     private ScheduledTask playerListBroadcastTask;
@@ -69,13 +72,21 @@ public class RedisBroker implements DataBroker {
         }
 
         try {
-            // Create Jedis pool
+            // Create Jedis pool with optimized settings
             JedisPoolConfig poolConfig = new JedisPoolConfig();
             poolConfig.setMaxTotal(10);
             poolConfig.setMaxIdle(5);
-            poolConfig.setMinIdle(1);
-            poolConfig.setTestOnBorrow(true);
-            poolConfig.setTestOnReturn(true);
+            poolConfig.setMinIdle(2);
+            // Don't test on every borrow/return - too slow
+            poolConfig.setTestOnBorrow(false);
+            poolConfig.setTestOnReturn(false);
+            // Test idle connections periodically instead
+            poolConfig.setTestWhileIdle(true);
+            poolConfig.setTimeBetweenEvictionRuns(Duration.ofSeconds(30));
+            poolConfig.setMinEvictableIdleTime(Duration.ofMinutes(1));
+            // Block briefly if pool exhausted instead of failing immediately
+            poolConfig.setBlockWhenExhausted(true);
+            poolConfig.setMaxWait(Duration.ofMillis(100));
 
             jedisPool = new JedisPool(poolConfig, URI.create(redisUrl));
 
@@ -83,6 +94,9 @@ public class RedisBroker implements DataBroker {
             try (Jedis jedis = jedisPool.getResource()) {
                 jedis.ping();
             }
+
+            // Create dedicated publisher connection (avoids pool overhead for high-frequency publishes)
+            publisherConnection = jedisPool.getResource();
 
             // Create message listener
             InteractiveChat.bungeeMessageListener = new BungeeMessageListener(plugin);
@@ -145,6 +159,8 @@ public class RedisBroker implements DataBroker {
                         if (started.get()) {
                             Bukkit.getConsoleSender().sendMessage("[InteractiveChat] Redis connection lost, reconnecting in 5 seconds...");
                             connected.set(false);
+                            // Recreate publisher connection on reconnect
+                            recreatePublisherConnection();
                             try {
                                 Thread.sleep(5000);
                             } catch (InterruptedException ie) {
@@ -160,10 +176,10 @@ public class RedisBroker implements DataBroker {
 
             // Start periodic player list broadcasting (every 2 seconds = 40 ticks)
             playerListBroadcastTask = Scheduler.runTaskTimerAsynchronously(plugin, () -> {
-                if (!started.get() || !connected.get()) {
-                    return;
-                }
                 try {
+                    if (!started.get() || !connected.get()) {
+                        return;
+                    }
                     BungeeMessageSender.broadcastPlayerList(System.currentTimeMillis(), serverName, Bukkit.getOnlinePlayers());
                 } catch (Exception e) {
                     // Silently ignore periodic broadcast errors
@@ -188,6 +204,25 @@ public class RedisBroker implements DataBroker {
             Bukkit.getConsoleSender().sendMessage("[InteractiveChat] Failed to connect to Redis: " + e.getMessage());
             e.printStackTrace();
             return false;
+        }
+    }
+
+    private void recreatePublisherConnection() {
+        synchronized (publisherLock) {
+            try {
+                Jedis old = publisherConnection;
+                publisherConnection = null;
+                if (old != null) {
+                    try { old.close(); } catch (Exception ignored) {}
+                }
+                JedisPool pool = jedisPool;
+                if (pool != null && !pool.isClosed()) {
+                    publisherConnection = pool.getResource();
+                }
+            } catch (Exception e) {
+                // Ignore, will retry on next send
+                publisherConnection = null;
+            }
         }
     }
 
@@ -229,6 +264,18 @@ public class RedisBroker implements DataBroker {
             subscriberExecutor = null;
         }
 
+        // Close dedicated publisher connection
+        synchronized (publisherLock) {
+            if (publisherConnection != null) {
+                try {
+                    publisherConnection.close();
+                } catch (Exception e) {
+                    // Ignore
+                }
+                publisherConnection = null;
+            }
+        }
+
         if (jedisPool != null && !jedisPool.isClosed()) {
             jedisPool.close();
             jedisPool = null;
@@ -241,17 +288,59 @@ public class RedisBroker implements DataBroker {
 
     @Override
     public boolean sendData(byte[] data) {
-        if (!started.get() || jedisPool == null || jedisPool.isClosed()) {
+        if (!started.get() || !connected.get()) {
             return false;
         }
 
-        try (Jedis jedis = jedisPool.getResource()) {
-            String message = serverName + "|" + Base64.getEncoder().encodeToString(data);
-            jedis.publish(channelName, message);
-            return true;
-        } catch (Exception e) {
-            e.printStackTrace();
+        JedisPool pool = jedisPool;
+        if (pool == null || pool.isClosed()) {
             return false;
+        }
+
+        String message = serverName + "|" + Base64.getEncoder().encodeToString(data);
+
+        // Use dedicated publisher connection for better performance
+        synchronized (publisherLock) {
+            try {
+                Jedis publisher = publisherConnection;
+                if (publisher == null) {
+                    publisher = pool.getResource();
+                    publisherConnection = publisher;
+                }
+
+                // Check if connection is still valid
+                try {
+                    if (!publisher.isConnected()) {
+                        publisher.close();
+                        publisher = pool.getResource();
+                        publisherConnection = publisher;
+                    }
+                } catch (Exception e) {
+                    // isConnected() failed, recreate connection
+                    try { publisher.close(); } catch (Exception ignored) {}
+                    publisher = pool.getResource();
+                    publisherConnection = publisher;
+                }
+
+                publisher.publish(channelName, message);
+                return true;
+            } catch (Exception e) {
+                // Connection might be broken, try to recreate once
+                try {
+                    if (publisherConnection != null) {
+                        try { publisherConnection.close(); } catch (Exception ignored) {}
+                        publisherConnection = null;
+                    }
+                    Jedis newPublisher = pool.getResource();
+                    publisherConnection = newPublisher;
+                    newPublisher.publish(channelName, message);
+                    return true;
+                } catch (Exception e2) {
+                    // Give up, will retry next time
+                    publisherConnection = null;
+                }
+                return false;
+            }
         }
     }
 

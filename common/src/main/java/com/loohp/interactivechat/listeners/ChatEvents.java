@@ -23,6 +23,7 @@ package com.loohp.interactivechat.listeners;
 import com.loohp.interactivechat.InteractiveChat;
 import com.loohp.interactivechat.api.InteractiveChatAPI;
 import com.loohp.interactivechat.bungeemessaging.BungeeMessageSender;
+import com.loohp.interactivechat.bungeemessaging.DataBrokerType;
 import com.loohp.interactivechat.data.PlayerDataManager.PlayerData;
 import com.loohp.interactivechat.objectholders.CooldownResult;
 import com.loohp.interactivechat.objectholders.ICPlaceholder;
@@ -57,10 +58,37 @@ import java.util.List;
 import java.util.Map;
 import java.util.Map.Entry;
 import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 public class ChatEvents implements Listener {
+
+    // Pending cross-server mentions: senderUUID -> Map<receiverUUID, timestamp>
+    // These are sent only when OutMessagePacket actually processes the chat
+    private static final Map<UUID, Map<UUID, Long>> pendingCrossServerMentions = new ConcurrentHashMap<>();
+
+    /**
+     * Queue a cross-server mention to be sent when the chat packet is actually processed.
+     */
+    public static void queueCrossServerMention(UUID senderUUID, UUID receiverUUID) {
+        pendingCrossServerMentions.computeIfAbsent(senderUUID, k -> new ConcurrentHashMap<>())
+            .put(receiverUUID, System.currentTimeMillis());
+    }
+
+    /**
+     * Get and remove pending cross-server mentions for a sender.
+     * Called by OutMessagePacket when the chat is actually being sent.
+     */
+    public static Map<UUID, Long> consumePendingCrossServerMentions(UUID senderUUID) {
+        Map<UUID, Long> pending = pendingCrossServerMentions.remove(senderUUID);
+        if (pending != null) {
+            // Filter out old entries (older than 5 seconds)
+            long now = System.currentTimeMillis();
+            pending.entrySet().removeIf(e -> now - e.getValue() > 5000);
+        }
+        return pending;
+    }
 
     @EventHandler(priority = EventPriority.LOWEST)
     public void onCommandLowest(PlayerCommandPreprocessEvent event) {
@@ -181,7 +209,8 @@ public class ChatEvents implements Listener {
     }
 
     public static void checkChat(AsyncPlayerChatEvent event) {
-        if (!InteractiveChat.bungeecordMode) {
+        // Strip ID_PATTERN if not using proxy plugin (non-bungeecord or Redis mode)
+        if (!InteractiveChat.bungeecordMode || InteractiveChat.dataBrokerType == DataBrokerType.REDIS) {
             event.setMessage(Registry.ID_PATTERN.matcher(event.getMessage()).replaceAll(""));
         }
         translateAltColorCode(event);
@@ -193,7 +222,8 @@ public class ChatEvents implements Listener {
     }
 
     public static void checkCommand(PlayerCommandPreprocessEvent event) {
-        if (!InteractiveChat.bungeecordMode) {
+        // Strip ID_PATTERN if not using proxy plugin (non-bungeecord or Redis mode)
+        if (!InteractiveChat.bungeecordMode || InteractiveChat.dataBrokerType == DataBrokerType.REDIS) {
             event.setMessage(Registry.ID_PATTERN.matcher(event.getMessage()).replaceAll(""));
         }
         boolean flag = true;
@@ -377,20 +407,20 @@ public class ChatEvents implements Listener {
         PlayerData data = InteractiveChat.playerDataManager.getPlayerData(sender);
         if (InteractiveChat.allowMention && (data == null || !data.isMentionDisabled())) {
             String processedMessage;
-            if (!InteractiveChat.disableEveryone && (processedMessage = checkMentionEveryone("chat", message, sender)) != null) {
+            if (!InteractiveChat.disableEveryone && (processedMessage = checkMentionEveryone("chat", message, sender, event)) != null) {
                 return processedMessage;
             }
             if (!InteractiveChat.disableHere && (processedMessage = checkMentionHere("chat", message, sender)) != null) {
                 return processedMessage;
             }
-            if ((processedMessage = checkMentionPlayers("chat", message, sender)) != null) {
+            if ((processedMessage = checkMentionPlayers("chat", message, sender, event)) != null) {
                 return processedMessage;
             }
         }
         return message;
     }
 
-    public static String checkMentionPlayers(String senderTagType, String message, Player sender) {
+    public static String checkMentionPlayers(String senderTagType, String message, Player sender, AsyncPlayerChatEvent event) {
         boolean senderTagged = Registry.ID_PATTERN.matcher(message).find();
         if (PlayerUtils.hasPermission(sender.getUniqueId(), "interactivechat.mention.player", false, 200)) {
             Map<String, UUID> playernames = new HashMap<>();
@@ -411,7 +441,8 @@ public class ChatEvents implements Listener {
                 UUID uuid = entry.getValue();
                 int index = message.toLowerCase().indexOf(name.toLowerCase());
                 if (index >= 0) {
-                    if (senderTagged) {
+                    // In Redis mode (no proxy plugin), use simple tag format that can be processed locally
+                    if (senderTagged || InteractiveChat.dataBrokerType == DataBrokerType.REDIS) {
                         message = Registry.MENTION_TAG_CONVERTER.convertToTag(name, message);
                     } else {
                         String tagStyle = Registry.MENTION_TAG_CONVERTER.getTagStyle(name);
@@ -425,6 +456,13 @@ public class ChatEvents implements Listener {
                                 BungeeMessageSender.forwardMentionPair(System.currentTimeMillis(), sender.getUniqueId(), uuid);
                             } catch (Exception e) {
                                 e.printStackTrace();
+                            }
+                        }
+                        // In Redis mode, queue cross-server mention to be sent when chat packet is processed
+                        if (InteractiveChat.dataBrokerType == DataBrokerType.REDIS) {
+                            ICPlayer targetPlayer = ICPlayerFactory.getICPlayer(uuid);
+                            if (targetPlayer != null && !targetPlayer.isLocal()) {
+                                queueCrossServerMention(sender.getUniqueId(), uuid);
                             }
                         }
                     }
@@ -441,7 +479,8 @@ public class ChatEvents implements Listener {
             String name = InteractiveChat.mentionPrefix + "here";
             int index = message.toLowerCase().indexOf(name.toLowerCase());
             if (index >= 0) {
-                if (senderTagged) {
+                // In Redis mode (no proxy plugin), use simple tag format that can be processed locally
+                if (senderTagged || InteractiveChat.dataBrokerType == DataBrokerType.REDIS) {
                     message = Registry.MENTION_TAG_CONVERTER.convertToTag(name, message);
                 } else {
                     String tagStyle = Registry.MENTION_TAG_CONVERTER.getTagStyle(name);
@@ -467,22 +506,23 @@ public class ChatEvents implements Listener {
         return null;
     }
 
-    public static String checkMentionEveryone(String senderTagType, String message, Player sender) {
+    public static String checkMentionEveryone(String senderTagType, String message, Player sender, AsyncPlayerChatEvent event) {
         if (PlayerUtils.hasPermission(sender.getUniqueId(), "interactivechat.mention.everyone", false, 200)) {
             boolean senderTagged = Registry.ID_PATTERN.matcher(message).find();
             String name = InteractiveChat.mentionPrefix + "everyone";
             int index = message.toLowerCase().indexOf(name.toLowerCase());
             if (index >= 0) {
-                if (senderTagged) {
+                // In Redis mode (no proxy plugin), use simple tag format that can be processed locally
+                if (senderTagged || InteractiveChat.dataBrokerType == DataBrokerType.REDIS) {
                     message = Registry.MENTION_TAG_CONVERTER.convertToTag(name, message);
                 } else {
                     String tagStyle = Registry.MENTION_TAG_CONVERTER.getTagStyle(name);
                     String uuidmatch = "<" + senderTagType + "=" + sender.getUniqueId() + ":" + Registry.ID_ESCAPE_PATTERN.matcher(tagStyle).replaceAll("\\>") + ":>";
                     message = message.replace(name, uuidmatch);
                 }
-                List<UUID> players = new ArrayList<>();
-                ICPlayerFactory.getOnlineICPlayers().forEach(each -> players.add(each.getUniqueId()));
-                for (UUID uuid : players) {
+                List<ICPlayer> players = new ArrayList<>(ICPlayerFactory.getOnlineICPlayers());
+                for (ICPlayer icPlayer : players) {
+                    UUID uuid = icPlayer.getUniqueId();
                     if (!uuid.equals(sender.getUniqueId())) {
                         InteractiveChat.mentionPair.add(new MentionPair(sender.getUniqueId(), uuid));
                         if (InteractiveChat.bungeecordMode) {
@@ -491,6 +531,10 @@ public class ChatEvents implements Listener {
                             } catch (Exception e) {
                                 e.printStackTrace();
                             }
+                        }
+                        // In Redis mode, queue cross-server mention to be sent when chat packet is processed
+                        if (InteractiveChat.dataBrokerType == DataBrokerType.REDIS && !icPlayer.isLocal()) {
+                            queueCrossServerMention(sender.getUniqueId(), uuid);
                         }
                     }
                 }

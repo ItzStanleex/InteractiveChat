@@ -29,6 +29,7 @@ import com.loohp.interactivechat.api.InteractiveChatAPI;
 import com.loohp.interactivechat.api.InteractiveChatAPI.SharedType;
 import com.loohp.interactivechat.api.events.ProxyCustomDataReceivedEvent;
 import com.loohp.interactivechat.data.PlayerDataManager.PlayerData;
+import com.loohp.interactivechat.modules.MentionDisplay;
 import com.loohp.interactivechat.modules.ProcessExternalMessage;
 import com.loohp.interactivechat.objectholders.BuiltInPlaceholder;
 import com.loohp.interactivechat.objectholders.CustomPlaceholder;
@@ -488,6 +489,29 @@ public class BungeeMessageListener implements PluginMessageListener {
                         existingFromServer.removeAll(playersFromThisServer);
                         for (UUID removedUUID : existingFromServer) {
                             ICPlayerFactory.removeRemoteICPlayer(removedUUID);
+                        }
+                        break;
+                    case 0x17:
+                        // Remote mention notification - directly trigger mention for a local player
+                        // Used in Redis mode where chat messages don't go through a proxy
+                        UUID mentionSenderUUID = DataTypeIO.readUUID(input);
+                        String mentionSenderName = DataTypeIO.readString(input, StandardCharsets.UTF_8);
+                        UUID mentionReceiverUUID = DataTypeIO.readUUID(input);
+                        Player mentionReceiver = Bukkit.getPlayer(mentionReceiverUUID);
+                        if (mentionReceiver != null && mentionReceiver.isOnline()) {
+                            // Store pending highlight for when the chat message is processed
+                            MentionDisplay.addPendingCrossServerHighlight(mentionReceiverUUID, mentionSenderUUID, mentionSenderName);
+
+                            // Get ICPlayer for the remote sender (should exist from player list sync)
+                            ICPlayer mentionSender = ICPlayerFactory.getICPlayer(mentionSenderUUID);
+                            if (mentionSender != null) {
+                                // Trigger mention notification directly on the main thread
+                                Player finalReceiver = mentionReceiver;
+                                ICPlayer finalSender = mentionSender;
+                                Scheduler.runTask(InteractiveChat.plugin, () -> {
+                                    MentionDisplay.triggerDirectMentionNotification(finalReceiver, finalSender, System.currentTimeMillis());
+                                }, mentionReceiver);
+                            }
                         }
                         break;
                     case 0xFF:

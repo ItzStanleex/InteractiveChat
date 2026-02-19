@@ -376,4 +376,18 @@ public class BungeeMessageSender {
         return forwardData(time, 0x16, out.toByteArray());
     }
 
+    /**
+     * Sends a direct mention notification to a remote player.
+     * Used in Redis mode where chat messages don't go through a proxy.
+     * This triggers the mention sound/title/etc. directly on the target server.
+     * Packet 0x17
+     */
+    public static boolean sendRemoteMentionNotification(long time, UUID senderUUID, String senderName, UUID receiverUUID) throws Exception {
+        ByteArrayDataOutput out = ByteStreams.newDataOutput();
+        DataTypeIO.writeUUID(out, senderUUID);
+        DataTypeIO.writeString(out, senderName, StandardCharsets.UTF_8);
+        DataTypeIO.writeUUID(out, receiverUUID);
+        return forwardData(time, 0x17, out.toByteArray());
+    }
+
 }

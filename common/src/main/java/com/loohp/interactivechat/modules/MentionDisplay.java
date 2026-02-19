@@ -27,6 +27,7 @@ import com.loohp.interactivechat.api.events.PlayerMentionPlayerEvent;
 import com.loohp.interactivechat.nms.NMS;
 import com.loohp.interactivechat.objectholders.Either;
 import com.loohp.interactivechat.objectholders.ICPlayer;
+import com.loohp.interactivechat.objectholders.ICPlayerFactory;
 import com.loohp.interactivechat.objectholders.MentionPair;
 import com.loohp.interactivechat.registry.Registry;
 import com.loohp.interactivechat.utils.ChatColorUtils;
@@ -65,6 +66,76 @@ import java.util.concurrent.ConcurrentHashMap;
 public class MentionDisplay implements Listener {
 
     private static final ItemStack WRITABLE_BOOK = XMaterial.WRITABLE_BOOK.parseItem();
+
+    // Pending cross-server highlights: receiverUUID -> PendingHighlight
+    // Used when sender detection fails but we received a mention notification from another server
+    private static final Map<UUID, PendingCrossServerHighlight> pendingCrossServerHighlights = new ConcurrentHashMap<>();
+
+    public static class PendingCrossServerHighlight {
+        public final UUID senderUUID;
+        public final String senderName;
+        public final long timestamp;
+
+        public PendingCrossServerHighlight(UUID senderUUID, String senderName, long timestamp) {
+            this.senderUUID = senderUUID;
+            this.senderName = senderName;
+            this.timestamp = timestamp;
+        }
+    }
+
+    /**
+     * Store a pending cross-server highlight for when the chat message arrives.
+     */
+    public static void addPendingCrossServerHighlight(UUID receiverUUID, UUID senderUUID, String senderName) {
+        pendingCrossServerHighlights.put(receiverUUID, new PendingCrossServerHighlight(senderUUID, senderName, System.currentTimeMillis()));
+    }
+
+    /**
+     * Get and remove a pending cross-server highlight.
+     * Returns null if no pending highlight or if it's too old (>5 seconds).
+     */
+    public static PendingCrossServerHighlight consumePendingCrossServerHighlight(UUID receiverUUID) {
+        PendingCrossServerHighlight highlight = pendingCrossServerHighlights.remove(receiverUUID);
+        if (highlight != null && System.currentTimeMillis() - highlight.timestamp > 5000) {
+            return null; // Too old, ignore
+        }
+        return highlight;
+    }
+
+    /**
+     * Apply cross-server mention highlighting when sender detection failed.
+     * This is called from OutMessagePacket when we have a pending highlight but no detected sender.
+     */
+    public static Component applyCrossServerHighlight(Component component, Player receiver, PendingCrossServerHighlight highlight) {
+        List<String> names = new ArrayList<>();
+        names.add(ChatColorUtils.stripColor(receiver.getName()));
+        if (InteractiveChat.useBukkitDisplayName && !ChatColorUtils.stripColor(receiver.getName()).equals(ChatColorUtils.stripColor(receiver.getDisplayName()))) {
+            names.add(ChatColorUtils.stripColor(receiver.getDisplayName()));
+        }
+        List<String> nicknames = InteractiveChatAPI.getNicknames(receiver.getUniqueId());
+        for (String name : nicknames) {
+            names.add(ChatColorUtils.stripColor(name));
+        }
+
+        // Get sender display name from ICPlayer if available
+        ICPlayer senderPlayer = ICPlayerFactory.getICPlayer(highlight.senderUUID);
+        String senderDisplayName = senderPlayer != null ? senderPlayer.getDisplayName() : highlight.senderName;
+
+        for (String name : names) {
+            component = processCrossServerHighlight(InteractiveChat.mentionPrefix + name, receiver, senderDisplayName, component);
+        }
+
+        return component;
+    }
+
+    private static Component processCrossServerHighlight(String placeholder, Player receiver, String senderDisplayName, Component component) {
+        String replacementText = ChatColorUtils.translateAlternateColorCodes('&', InteractiveChat.mentionHighlight.replace("{MentionedPlayer}", Registry.MENTION_TAG_CONVERTER.revertTags(placeholder)));
+        Component replacement = LegacyComponentSerializer.legacySection().deserialize(replacementText);
+        String hoverText = ChatColorUtils.translateAlternateColorCodes('&', InteractiveChat.mentionHover.replace("{Sender}", senderDisplayName).replace("{Receiver}", receiver.getDisplayName()));
+        HoverEvent<Component> hoverEvent = HoverEvent.showText(LegacyComponentSerializer.legacySection().deserialize(hoverText));
+        replacement = replacement.hoverEvent(hoverEvent);
+        return ComponentReplacing.replace(component, CustomStringUtils.escapeMetaCharacters(Registry.MENTION_TAG_CONVERTER.getTagStyle(placeholder)), true, replacement);
+    }
 
     public static void setup() {
         Bukkit.getPluginManager().registerEvents(new MentionDisplay(), InteractiveChat.plugin);
@@ -212,6 +283,101 @@ public class MentionDisplay implements Listener {
         HoverEvent<Component> hoverEvent = HoverEvent.showText(LegacyComponentSerializer.legacySection().deserialize(hoverText));
         replacement = replacement.hoverEvent(hoverEvent);
         return ComponentReplacing.replace(component, CustomStringUtils.escapeMetaCharacters(Registry.MENTION_TAG_CONVERTER.getTagStyle(placeholder)), true, replacement);
+    }
+
+    /**
+     * Triggers a mention notification directly for a player.
+     * Used in Redis mode where chat messages don't go through a proxy,
+     * so the normal MentionPair + chat processing flow doesn't work.
+     */
+    public static void triggerDirectMentionNotification(Player receiver, ICPlayer sender, long unix) {
+        Component title = PlaceholderParser.parse(sender, InteractiveChat.mentionTitle);
+        Component subtitle = PlaceholderParser.parse(sender, InteractiveChat.mentionSubtitle);
+        Component actionbar = PlaceholderParser.parse(sender, InteractiveChat.mentionActionbar);
+        Component toast = PlaceholderParser.parse(sender, InteractiveChat.mentionToast);
+        Component bossBarText = PlaceholderParser.parse(sender, InteractiveChat.mentionBossBarText);
+        String bossBarColorName = InteractiveChat.mentionBossBarColorName;
+        String bossBarOverlayName = InteractiveChat.mentionBossBarOverlayName;
+
+        Optional<BossBar> optBossBar;
+        if (ComponentUtils.isEmpty(bossBarText)) {
+            optBossBar = Optional.empty();
+        } else {
+            optBossBar = Optional.of(BossBar.bossBar(bossBarText, 1, Color.valueOf(bossBarColorName.toUpperCase()), Overlay.valueOf(bossBarOverlayName.toUpperCase())));
+        }
+
+        String settings = InteractiveChat.mentionSound;
+        Either<Sound, String> sound;
+        float volume = 3.0F;
+        float pitch = 1.0F;
+
+        String[] settingsArgs = settings.split(":");
+        if (settingsArgs.length >= 3) {
+            settings = String.join("", Arrays.copyOfRange(settingsArgs, 0, settingsArgs.length - 2)).toUpperCase();
+            try {
+                volume = Float.parseFloat(settingsArgs[settingsArgs.length - 2]);
+            } catch (Exception ignore) {
+            }
+            try {
+                pitch = Float.parseFloat(settingsArgs[settingsArgs.length - 1]);
+            } catch (Exception ignore) {
+            }
+        } else {
+            settings = settings.toUpperCase();
+        }
+
+        Sound bukkitSound = SoundUtils.parseSound(settings);
+        if (bukkitSound == null) {
+            settings = settings.toLowerCase();
+            if (!settings.contains(":")) {
+                settings = "minecraft:" + settings;
+            }
+            sound = Either.right(settings);
+        } else {
+            sound = Either.left(bukkitSound);
+        }
+
+        boolean silent = false;
+        Map<UUID, Long> lastMentionMapping = InteractiveChat.lastNonSilentMentionTime.get(receiver.getUniqueId());
+        if (lastMentionMapping != null) {
+            Long lastMention = lastMentionMapping.get(sender.getUniqueId());
+            silent = lastMention != null && unix - lastMention < InteractiveChat.mentionCooldown;
+        }
+
+        if (!silent) {
+            if (lastMentionMapping != null) {
+                lastMentionMapping.put(sender.getUniqueId(), unix);
+            }
+
+            int time = InteractiveChat.mentionTitleDuration;
+            NMS.getInstance().sendTitle(receiver, title, subtitle, actionbar, 10, Math.max(time, 1), 20);
+
+            if (sound != null) {
+                float finalVolume = volume;
+                float finalPitch = pitch;
+                if (sound.isLeft()) {
+                    receiver.playSound(receiver.getLocation(), sound.getLeft(), finalVolume, finalPitch);
+                } else {
+                    String soundLocation = sound.getRight();
+                    if (!soundLocation.contains(":")) {
+                        soundLocation = "minecraft:" + soundLocation;
+                    }
+                    receiver.playSound(receiver.getLocation(), soundLocation.toLowerCase(), finalVolume, finalPitch);
+                }
+            }
+
+            if (!ComponentUtils.isEmpty(toast) && InteractiveChat.version.isNewerOrEqualTo(MCVersion.V1_12)) {
+                String toastJson = InteractiveChatComponentSerializer.gson().serialize(toast);
+                NMS.getInstance().sendToast(sender, receiver, toastJson, WRITABLE_BOOK.clone());
+            }
+
+            int bossBarTime = InteractiveChat.mentionBossBarDuration;
+            int bossBarRemoveDelay = InteractiveChat.mentionBossBarRemoveDelay;
+            if (optBossBar.isPresent() && !InteractiveChat.version.isOld()) {
+                BossBarUpdater updater = BossBarUpdater.update(optBossBar.get(), receiver);
+                BossBarUpdater.countdownBossBar(updater, Math.max(bossBarTime, 1), Math.max(bossBarRemoveDelay, 0));
+            }
+        }
     }
 
 }
