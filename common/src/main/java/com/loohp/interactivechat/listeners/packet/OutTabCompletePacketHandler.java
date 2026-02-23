@@ -37,11 +37,14 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicReference;
 
 public class OutTabCompletePacketHandler {
 
     public static final AtomicReference<Map<String, UUID>> playerNames = new AtomicReference<>(Collections.emptyMap());
+    // Cached parsed tooltips per player UUID - updated asynchronously to avoid synchronous PlaceholderAPI parsing
+    private static final Map<UUID, Component> cachedTooltips = new ConcurrentHashMap<>();
 
     public static void init() {
         schedulePlayerNamesUpdate();
@@ -51,10 +54,22 @@ public class OutTabCompletePacketHandler {
         Scheduler.runTaskTimerAsynchronously(InteractiveChat.plugin, () -> {
             if (InteractiveChat.useTooltipOnTab) {
                 Map<String, UUID> names = new HashMap<>();
+                Map<UUID, Component> tooltips = new HashMap<>();
                 for (ICPlayer player : ICPlayerFactory.getOnlineICPlayers()) {
                     addPlayerNames(names, player);
+                    // Pre-parse tooltips asynchronously to avoid blocking main thread
+                    try {
+                        Component tooltip = PlaceholderParser.parse(player, InteractiveChat.tabTooltip);
+                        tooltips.put(player.getUniqueId(), tooltip);
+                    } catch (Exception e) {
+                        // Ignore parsing errors for individual players
+                    }
                 }
-                Scheduler.runTask(InteractiveChat.plugin, () -> playerNames.set(names));
+                Scheduler.runTask(InteractiveChat.plugin, () -> {
+                    playerNames.set(names);
+                    cachedTooltips.clear();
+                    cachedTooltips.putAll(tooltips);
+                });
             }
         }, 0, 100);
     }
@@ -80,7 +95,12 @@ public class OutTabCompletePacketHandler {
     }
 
     public static Component createComponent(ICPlayer icplayer, Player tabCompleter) {
-        Component component = PlaceholderParser.parse(icplayer, InteractiveChat.tabTooltip);
+        // Use cached tooltip to avoid synchronous PlaceholderAPI parsing on main thread
+        Component component = cachedTooltips.get(icplayer.getUniqueId());
+        if (component == null) {
+            // Fallback: return simple name if not cached yet (first 5 seconds after join)
+            component = Component.text(icplayer.getDisplayName());
+        }
         if (!PlayerUtils.canChatColor(tabCompleter)) {
             component = ComponentStyling.stripColor(component);
         }

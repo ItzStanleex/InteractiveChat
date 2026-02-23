@@ -32,8 +32,10 @@ import redis.clients.jedis.JedisPubSub;
 import java.net.URI;
 import java.time.Duration;
 import java.util.Base64;
+import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
@@ -50,10 +52,11 @@ public class RedisBroker implements DataBroker {
     private final String channelName;
 
     private JedisPool jedisPool;
-    private Jedis publisherConnection;  // Dedicated connection for publishing - avoids pool overhead
-    private final Object publisherLock = new Object();
+    private Jedis publisherConnection;  // Dedicated connection for publishing
     private JedisPubSub subscriber;
     private ExecutorService subscriberExecutor;
+    private ExecutorService publisherExecutor;  // Dedicated thread for async publishing
+    private final BlockingQueue<String> publishQueue = new LinkedBlockingQueue<>(10000);  // Async message queue
     private ScheduledTask playerListBroadcastTask;
     private final AtomicBoolean started = new AtomicBoolean(false);
     private final AtomicBoolean connected = new AtomicBoolean(false);
@@ -95,8 +98,14 @@ public class RedisBroker implements DataBroker {
                 jedis.ping();
             }
 
-            // Create dedicated publisher connection (avoids pool overhead for high-frequency publishes)
-            publisherConnection = jedisPool.getResource();
+            // Start async publisher thread
+            publisherExecutor = Executors.newSingleThreadExecutor(r -> {
+                Thread t = new Thread(r, "InteractiveChat-Redis-Publisher");
+                t.setDaemon(true);
+                return t;
+            });
+
+            publisherExecutor.submit(this::publisherLoop);
 
             // Create message listener
             InteractiveChat.bungeeMessageListener = new BungeeMessageListener(plugin);
@@ -159,8 +168,6 @@ public class RedisBroker implements DataBroker {
                         if (started.get()) {
                             Bukkit.getConsoleSender().sendMessage("[InteractiveChat] Redis connection lost, reconnecting in 5 seconds...");
                             connected.set(false);
-                            // Recreate publisher connection on reconnect
-                            recreatePublisherConnection();
                             try {
                                 Thread.sleep(5000);
                             } catch (InterruptedException ie) {
@@ -207,22 +214,59 @@ public class RedisBroker implements DataBroker {
         }
     }
 
-    private void recreatePublisherConnection() {
-        synchronized (publisherLock) {
+    /**
+     * Background loop that consumes messages from the queue and publishes to Redis.
+     * Runs on a dedicated thread to avoid blocking the main server thread.
+     */
+    private void publisherLoop() {
+        while (started.get() && !Thread.currentThread().isInterrupted()) {
             try {
-                Jedis old = publisherConnection;
-                publisherConnection = null;
-                if (old != null) {
-                    try { old.close(); } catch (Exception ignored) {}
+                // Wait for a message (blocks until available or interrupted)
+                String message = publishQueue.take();
+
+                // Skip if we're shutting down
+                if (!started.get()) {
+                    break;
                 }
+
+                // Ensure we have a valid connection
                 JedisPool pool = jedisPool;
-                if (pool != null && !pool.isClosed()) {
+                if (pool == null || pool.isClosed()) {
+                    continue;
+                }
+
+                // Get or create publisher connection
+                if (publisherConnection == null || !publisherConnection.isConnected()) {
+                    if (publisherConnection != null) {
+                        try { publisherConnection.close(); } catch (Exception ignored) {}
+                    }
                     publisherConnection = pool.getResource();
                 }
+
+                // Publish the message
+                try {
+                    publisherConnection.publish(channelName, message);
+                } catch (Exception e) {
+                    // Connection might be broken, close and retry next iteration
+                    try { publisherConnection.close(); } catch (Exception ignored) {}
+                    publisherConnection = null;
+                }
+
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                break;
             } catch (Exception e) {
-                // Ignore, will retry on next send
-                publisherConnection = null;
+                // Log but don't crash the publisher thread
+                if (started.get()) {
+                    e.printStackTrace();
+                }
             }
+        }
+
+        // Cleanup publisher connection on exit
+        if (publisherConnection != null) {
+            try { publisherConnection.close(); } catch (Exception ignored) {}
+            publisherConnection = null;
         }
     }
 
@@ -264,17 +308,14 @@ public class RedisBroker implements DataBroker {
             subscriberExecutor = null;
         }
 
-        // Close dedicated publisher connection
-        synchronized (publisherLock) {
-            if (publisherConnection != null) {
-                try {
-                    publisherConnection.close();
-                } catch (Exception e) {
-                    // Ignore
-                }
-                publisherConnection = null;
-            }
+        // Shutdown publisher executor (this will also close the publisher connection in publisherLoop)
+        if (publisherExecutor != null) {
+            publisherExecutor.shutdownNow();
+            publisherExecutor = null;
         }
+
+        // Clear any pending messages
+        publishQueue.clear();
 
         if (jedisPool != null && !jedisPool.isClosed()) {
             jedisPool.close();
@@ -292,56 +333,9 @@ public class RedisBroker implements DataBroker {
             return false;
         }
 
-        JedisPool pool = jedisPool;
-        if (pool == null || pool.isClosed()) {
-            return false;
-        }
-
+        // Non-blocking: just add to queue, publisher thread handles the rest
         String message = serverName + "|" + Base64.getEncoder().encodeToString(data);
-
-        // Use dedicated publisher connection for better performance
-        synchronized (publisherLock) {
-            try {
-                Jedis publisher = publisherConnection;
-                if (publisher == null) {
-                    publisher = pool.getResource();
-                    publisherConnection = publisher;
-                }
-
-                // Check if connection is still valid
-                try {
-                    if (!publisher.isConnected()) {
-                        publisher.close();
-                        publisher = pool.getResource();
-                        publisherConnection = publisher;
-                    }
-                } catch (Exception e) {
-                    // isConnected() failed, recreate connection
-                    try { publisher.close(); } catch (Exception ignored) {}
-                    publisher = pool.getResource();
-                    publisherConnection = publisher;
-                }
-
-                publisher.publish(channelName, message);
-                return true;
-            } catch (Exception e) {
-                // Connection might be broken, try to recreate once
-                try {
-                    if (publisherConnection != null) {
-                        try { publisherConnection.close(); } catch (Exception ignored) {}
-                        publisherConnection = null;
-                    }
-                    Jedis newPublisher = pool.getResource();
-                    publisherConnection = newPublisher;
-                    newPublisher.publish(channelName, message);
-                    return true;
-                } catch (Exception e2) {
-                    // Give up, will retry next time
-                    publisherConnection = null;
-                }
-                return false;
-            }
-        }
+        return publishQueue.offer(message);  // Returns false if queue is full (shouldn't happen with 10k capacity)
     }
 
     @Override
